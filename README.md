@@ -17,4 +17,3 @@ Push to `main` → GitHub webhook → `update_bot.sh` pulls & restarts → bot p
 ## Commands
 
 - `!ping` — Check bot latency
-  test
