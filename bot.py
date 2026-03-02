@@ -9,7 +9,8 @@ class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(
             command_prefix="!",
-            intents=INTENTS
+            intents=INTENTS,
+            help_command=commands.DefaultHelpCommand(no_category="Other", paginator=commands.Paginator(max_size=4000)),
         )
 
     async def setup_hook(self):
