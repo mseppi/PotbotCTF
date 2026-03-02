@@ -29,8 +29,8 @@ A fresh Discord bot built on the PotBot auto-update pipeline.
    [Service]
    Type=simple
    User=<your_user>
-   WorkingDirectory=/home/<your_user>/PotBot
-   ExecStart=/home/<your_user>/PotBot/venv/bin/python bot.py
+   WorkingDirectory=/home/<your_user>/PotBotCTF
+   ExecStart=/home/<your_user>/PotBotCTF/venv/bin/python bot.py
    Restart=on-failure
    RestartSec=5
 
@@ -48,8 +48,8 @@ A fresh Discord bot built on the PotBot auto-update pipeline.
    [Service]
    Type=simple
    User=<your_user>
-   WorkingDirectory=/home/<your_user>/PotBot
-   ExecStart=/home/<your_user>/PotBot/venv/bin/python webhook_listener.py
+   WorkingDirectory=/home/<your_user>/PotBotCTF
+   ExecStart=/home/<your_user>/PotBotCTF/venv/bin/python webhook_listener.py
    Restart=on-failure
    RestartSec=5
 
@@ -72,5 +72,3 @@ Push to `main` → GitHub webhook hits `/github-webhook` on port 5001 → `updat
 ## Commands
 
 - `!ping` — Check bot latency
-
-test commit
