@@ -561,8 +561,8 @@ class CtfTime(commands.Cog):
         async with ctx.typing():
             events, team_name = self._get_team_events(ctx.guild.id)
 
-        future = [e for e in events if e["start"] > unix_now or e["start"] == 0]
-        future.sort(key=lambda e: e["start"] if e["start"] else float("inf"))
+        future = [e for e in events if e["start"] > unix_now]
+        future.sort(key=lambda e: e["start"])
         self.my_upcoming_l = future  # store for countdown selection
 
         if not future:
@@ -582,10 +582,7 @@ class CtfTime(commands.Cog):
         )
         for i, ev in enumerate(to_show):
             date_display = ev.get("date_str", "")
-            if ev["start"] > unix_now:
-                countdown = self._format_timeleft(ev["start"] - unix_now)
-            else:
-                countdown = "Date unknown"
+            countdown = self._format_timeleft(ev["start"] - unix_now)
             embed.add_field(
                 name=f"[{i + 1}] {ev['name']}",
                 value=f"[CTFtime]({ev['url']})\n{date_display}\n\u23f1 {countdown}",
