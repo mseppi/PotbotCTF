@@ -30,8 +30,12 @@ class CtfTime(commands.Cog):
         sconf = serverdb[str(guild_id) + "-CONF"]
         return sconf.find_one({"name": "ctftime_team"})
 
-    def _scrape_team_event_ids(self, team_id: int) -> list[int]:
-        """Scrape event IDs from a CTFtime team page (planned/upcoming section)."""
+    def _scrape_team_events(self, team_id: int) -> list[dict]:
+        """Scrape planned events directly from the CTFtime team page (no API calls).
+
+        Returns a list of dicts with keys: name, url, event_id, start, date_str.
+        'start' is a UTC unix timestamp parsed from the date column.
+        """
         try:
             r = requests.get(f"https://ctftime.org/team/{team_id}", headers=self.HEADERS)
             if r.status_code != 200:
@@ -40,19 +44,42 @@ class CtfTime(commands.Cog):
         except Exception:
             return []
 
-        event_ids = set()
-        # First try: look for "Planned" / "Upcoming" headers
+        events = []
+        # Find the "Plan to participate" / "Upcoming" section
         for header in soup.find_all(["h2", "h3", "h4"]):
             header_text = header.get_text().lower()
-            if any(w in header_text for w in ["planned", "upcoming", "will participate"]):
-                next_elem = header.find_next("table")
-                if next_elem:
-                    for link in next_elem.find_all("a", href=re.compile(r"/event/(\d+)")):
-                        m = re.search(r"/event/(\d+)", link["href"])
-                        if m:
-                            event_ids.add(int(m.group(1)))
-
-        return list(event_ids)
+            if any(w in header_text for w in ["plan", "upcoming", "will participate"]):
+                table = header.find_next("table")
+                if not table:
+                    continue
+                for row in table.find_all("tr"):
+                    cols = row.find_all("td")
+                    if len(cols) < 2:
+                        continue
+                    link = cols[0].find("a", href=re.compile(r"/event/(\d+)"))
+                    if not link:
+                        continue
+                    m = re.search(r"/event/(\d+)", link["href"])
+                    if not m:
+                        continue
+                    event_name = link.get_text(strip=True)
+                    event_id = int(m.group(1))
+                    date_str = cols[1].get_text(strip=True)
+                    # Parse date like "March 27, 2026, 7 p.m." or "Feb. 18, 2026, 2 a.m."
+                    try:
+                        unix_start = int(parse(date_str).replace(tzinfo=timezone.utc).timestamp())
+                    except Exception:
+                        unix_start = 0
+                    events.append({
+                        "name": event_name,
+                        "url": f"https://ctftime.org/event/{event_id}",
+                        "event_id": event_id,
+                        "start": unix_start,
+                        "date_str": date_str,
+                        "img": "",
+                    })
+                break  # Only process the first matching table
+        return events
 
     def _fetch_event_detail(self, event_id: int) -> dict | None:
         """Fetch a single event from the CTFtime API and return a normalized dict."""
@@ -82,16 +109,37 @@ class CtfTime(commands.Cog):
             return None
 
     def _get_team_events(self, guild_id: int) -> tuple[list[dict], str]:
-        """Return (list_of_event_dicts, team_name) for the guild's team, or ([], '')."""
+        """Return (list_of_event_dicts, team_name) for the guild's team.
+
+        Uses HTML scraping only (fast, single request).
+        """
         team_doc = self._get_team_config(guild_id)
         if not team_doc:
             return [], ""
         team_id = team_doc["team_id"]
         team_name = team_doc.get("team_name", "Your team")
-        event_ids = self._scrape_team_event_ids(team_id)
+        events = self._scrape_team_events(team_id)
+        return events, team_name
+
+    def _get_team_events_full(self, guild_id: int) -> tuple[list[dict], str]:
+        """Like _get_team_events but fetches full details (including end time) from the API.
+
+        Used only by mycurrent/mytimeleft which need end timestamps.
+        """
+        team_doc = self._get_team_config(guild_id)
+        if not team_doc:
+            return [], ""
+        team_id = team_doc["team_id"]
+        team_name = team_doc.get("team_name", "Your team")
+        scraped = self._scrape_team_events(team_id)
+        # Only fetch API details for events that could be running now (started in past)
+        now_unix = int(datetime.utcnow().replace(tzinfo=timezone.utc).timestamp())
+        need_detail = [e for e in scraped if e["start"] <= now_unix]
+        if not need_detail:
+            return [], team_name
         events = []
         with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = {pool.submit(self._fetch_event_detail, eid): eid for eid in event_ids}
+            futures = {pool.submit(self._fetch_event_detail, e["event_id"]): e for e in need_detail}
             for fut in as_completed(futures):
                 ev = fut.result()
                 if ev:
@@ -415,8 +463,8 @@ class CtfTime(commands.Cog):
 
         now = datetime.utcnow()
         unix_now = int(now.replace(tzinfo=timezone.utc).timestamp())
-        future = [e for e in events if e["end"] > unix_now]
-        future.sort(key=lambda e: e["start"])
+        future = [e for e in events if e["start"] > unix_now or e["start"] == 0]
+        future.sort(key=lambda e: e["start"] if e["start"] else float("inf"))
 
         if not future:
             await ctx.send(
@@ -425,8 +473,20 @@ class CtfTime(commands.Cog):
             )
             return
 
+        embed = discord.Embed(
+            title=f"\U0001f4c5 Upcoming CTFs for {team_name}",
+            description=f"[Team page](https://ctftime.org/team/{team_doc['team_id']})",
+            color=int("f23a55", 16),
+        )
         for ev in future[:10]:
-            await ctx.channel.send(embed=self._make_upcoming_embed(ev))
+            date_display = ev.get("date_str", "")
+            embed.add_field(
+                name=ev["name"],
+                value=f"[CTFtime]({ev['url']})\n{date_display}",
+                inline=False,
+            )
+        embed.set_footer(text="Data from ctftime.org")
+        await ctx.send(embed=embed)
 
     @ctftime.command(aliases=["mynow", "myrunning"])
     async def mycurrent(self, ctx: commands.Context):
@@ -437,7 +497,7 @@ class CtfTime(commands.Cog):
             return
 
         async with ctx.typing():
-            events, team_name = self._get_team_events(ctx.guild.id)
+            events, team_name = self._get_team_events_full(ctx.guild.id)
 
         now = datetime.utcnow()
         unix_now = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -485,7 +545,7 @@ class CtfTime(commands.Cog):
             return
 
         async with ctx.typing():
-            events, team_name = self._get_team_events(ctx.guild.id)
+            events, team_name = self._get_team_events_full(ctx.guild.id)
 
         now = datetime.utcnow()
         unix_now = int(now.replace(tzinfo=timezone.utc).timestamp())
