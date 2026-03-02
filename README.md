@@ -8,7 +8,6 @@ A fresh Discord bot built on the PotBot auto-update pipeline.
 
    ```
    DISCORD_TOKEN=your_bot_token
-   UPDATE_CHANNEL_ID=your_channel_id
    GITHUB_WEBHOOK_SECRET=your_webhook_secret
    ```
 
