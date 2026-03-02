@@ -4,6 +4,7 @@ from discord.ext import tasks, commands
 from datetime import datetime, timezone
 from dateutil.parser import parse
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 from db import ctfs, serverdb
 
@@ -51,13 +52,6 @@ class CtfTime(commands.Cog):
                         if m:
                             event_ids.add(int(m.group(1)))
 
-        # Fallback: grab all event links on the page
-        if not event_ids:
-            for link in soup.find_all("a", href=re.compile(r"/event/(\d+)")):
-                m = re.search(r"/event/(\d+)", link["href"])
-                if m:
-                    event_ids.add(int(m.group(1)))
-
         return list(event_ids)
 
     def _fetch_event_detail(self, event_id: int) -> dict | None:
@@ -96,10 +90,12 @@ class CtfTime(commands.Cog):
         team_name = team_doc.get("team_name", "Your team")
         event_ids = self._scrape_team_event_ids(team_id)
         events = []
-        for eid in event_ids:
-            ev = self._fetch_event_detail(eid)
-            if ev:
-                events.append(ev)
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(self._fetch_event_detail, eid): eid for eid in event_ids}
+            for fut in as_completed(futures):
+                ev = fut.result()
+                if ev:
+                    events.append(ev)
         return events, team_name
 
     @staticmethod
