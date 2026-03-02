@@ -11,7 +11,10 @@ def in_ctf_channel():
         if teamdb[str(ctx.guild.id)].find_one({"name": str(ctx.message.channel)}):
             return True
         else:
-            await ctx.send("You must be in a created ctf channel to use ctf commands!")
+            # Only send the error when the user actually invoked the command,
+            # not when the help command is probing checks.
+            if ctx.invoked_with != "help":
+                await ctx.send("You must be in a created ctf channel to use ctf commands!")
             return False
     return commands.check(tocheck)
 
