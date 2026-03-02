@@ -1,73 +1,18 @@
 # PotBot
 
-A fresh Discord bot built on the PotBot auto-update pipeline.
+Discord bot with auto-update via GitHub webhooks.
 
 ## Setup
 
-1. Create a `.env` file:
+1. Create `.env` with `DISCORD_TOKEN` and `GITHUB_WEBHOOK_SECRET`.
+2. Create venv and install deps: `python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`
+3. Enable systemd services: `discordbot` (runs `bot.py`) and `potbot-webhook` (runs `webhook_listener.py` on port 5001).
+4. Expose port 5001 with ngrok: `ngrok http 5001`
+5. Add a GitHub webhook pointing to `https://<ngrok-url>/github-webhook` (Content type: `application/json`, secret from `.env`).
 
-   ```
-   DISCORD_TOKEN=your_bot_token
-   GITHUB_WEBHOOK_SECRET=your_webhook_secret
-   ```
+## Auto-Update
 
-2. Create a virtual environment and install dependencies:
-
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   ```
-
-3. Create a systemd service (`/etc/systemd/system/discordbot.service`):
-
-   ```ini
-   [Unit]
-   Description=PotBot Discord Bot
-   After=network.target
-
-   [Service]
-   Type=simple
-   User=<your_user>
-   WorkingDirectory=/home/<your_user>/PotBot
-   ExecStart=/home/<your_user>/PotBot/venv/bin/python bot.py
-   Restart=on-failure
-   RestartSec=5
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-4. Create a systemd service for the webhook listener (`/etc/systemd/system/potbot-webhook.service`):
-
-   ```ini
-   [Unit]
-   Description=PotBot GitHub Webhook Listener
-   After=network.target
-
-   [Service]
-   Type=simple
-   User=<your_user>
-   WorkingDirectory=/home/<your_user>/PotBot
-   ExecStart=/home/<your_user>/PotBot/venv/bin/python webhook_listener.py
-   Restart=on-failure
-   RestartSec=5
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-5. Enable and start:
-   ```bash
-   sudo systemctl enable discordbot
-   sudo systemctl start discordbot
-   sudo systemctl enable potbot-webhook
-   sudo systemctl start potbot-webhook
-   ```
-
-## Auto-Update Pipeline
-
-Push to `main` → GitHub webhook hits `/github-webhook` on port 5001 → `update_bot.sh` pulls, installs deps, restarts → bot sends commit message to Discord channel on startup.
+Push to `main` → GitHub webhook → `update_bot.sh` pulls & restarts → bot posts commit message to Discord.
 
 ## Commands
 
