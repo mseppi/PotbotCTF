@@ -1,7 +1,7 @@
 import re
 import discord
 from discord.ext import tasks, commands
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dateutil.parser import parse
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,6 +16,7 @@ class CtfTime(commands.Cog):
         "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:61.0) Gecko/20100101 Firefox/61.0",
     }
     DEFAULT_IMAGE = "https://pbs.twimg.com/profile_images/2189766987/ctftime-logo-avatar_400x400.png"
+    TZ = timezone(timedelta(hours=2))  # UTC+2
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -66,8 +67,9 @@ class CtfTime(commands.Cog):
                     event_id = int(m.group(1))
                     date_str = cols[1].get_text(strip=True)
                     # Parse date like "March 27, 2026, 7 p.m." or "Feb. 18, 2026, 2 a.m."
+                    # CTFtime shows dates in the user's profile TZ; we treat them as UTC+2
                     try:
-                        unix_start = int(parse(date_str).replace(tzinfo=timezone.utc).timestamp())
+                        unix_start = int(parse(date_str).replace(tzinfo=self.TZ).timestamp())
                     except Exception:
                         unix_start = 0
                     events.append({
@@ -79,6 +81,52 @@ class CtfTime(commands.Cog):
                         "img": "",
                     })
                 break  # Only process the first matching table
+        return events
+
+    def _scrape_team_past_events(self, team_id: int) -> list[dict]:
+        """Scrape past participated events from the CTFtime team page.
+
+        Returns a list of dicts: name, url, event_id, place, ctf_points, rating_points.
+        """
+        try:
+            r = requests.get(f"https://ctftime.org/team/{team_id}", headers=self.HEADERS)
+            if r.status_code != 200:
+                return []
+            soup = BeautifulSoup(r.text, "html.parser")
+        except Exception:
+            return []
+
+        events = []
+        for header in soup.find_all(["h2", "h3", "h4"]):
+            if "participated" in header.get_text().lower():
+                # The tab-content div after this header contains yearly tables
+                tab_content = header.find_next("div", class_="tab-content")
+                if not tab_content:
+                    continue
+                for table in tab_content.find_all("table", class_="table"):
+                    for row in table.find_all("tr"):
+                        cols = row.find_all("td")
+                        if len(cols) < 4:
+                            continue
+                        link = row.find("a", href=re.compile(r"/event/(\d+)"))
+                        if not link:
+                            continue
+                        m = re.search(r"/event/(\d+)", link["href"])
+                        if not m:
+                            continue
+                        # cols: [place_ico, place, event_link, ctf_points, rating_points]
+                        place_text = cols[1].get_text(strip=True) if len(cols) > 1 else "?"
+                        ctf_pts = cols[3].get_text(strip=True) if len(cols) > 3 else ""
+                        rat_pts = cols[4].get_text(strip=True) if len(cols) > 4 else ""
+                        events.append({
+                            "name": link.get_text(strip=True),
+                            "url": f"https://ctftime.org/event/{m.group(1)}",
+                            "event_id": int(m.group(1)),
+                            "place": place_text,
+                            "ctf_points": ctf_pts,
+                            "rating_points": rat_pts,
+                        })
+                break
         return events
 
     def _fetch_event_detail(self, event_id: int) -> dict | None:
@@ -450,47 +498,9 @@ class CtfTime(commands.Cog):
             embed.add_field(name="Aliases", value=", ".join(data["aliases"][:5]), inline=False)
         await ctx.send(embed=embed)
 
-    @ctftime.command(aliases=["myctf", "registered"])
-    async def myctfs(self, ctx: commands.Context):
-        """Show upcoming CTFs your team is registered for."""
-        team_doc = self._get_team_config(ctx.guild.id)
-        if not team_doc:
-            await ctx.send("No team set! Use `!ctftime setteam <team_id or url>` first.")
-            return
-
-        async with ctx.typing():
-            events, team_name = self._get_team_events(ctx.guild.id)
-
-        now = datetime.utcnow()
-        unix_now = int(now.replace(tzinfo=timezone.utc).timestamp())
-        future = [e for e in events if e["start"] > unix_now or e["start"] == 0]
-        future.sort(key=lambda e: e["start"] if e["start"] else float("inf"))
-
-        if not future:
-            await ctx.send(
-                f"No upcoming/planned CTFs found for **{team_name}**.\n"
-                f"Check the team page: https://ctftime.org/team/{team_doc['team_id']}"
-            )
-            return
-
-        embed = discord.Embed(
-            title=f"\U0001f4c5 Upcoming CTFs for {team_name}",
-            description=f"[Team page](https://ctftime.org/team/{team_doc['team_id']})",
-            color=int("f23a55", 16),
-        )
-        for ev in future[:10]:
-            date_display = ev.get("date_str", "")
-            embed.add_field(
-                name=ev["name"],
-                value=f"[CTFtime]({ev['url']})\n{date_display}",
-                inline=False,
-            )
-        embed.set_footer(text="Data from ctftime.org")
-        await ctx.send(embed=embed)
-
     @ctftime.command(aliases=["mynow", "myrunning"])
     async def mycurrent(self, ctx: commands.Context):
-        """Show currently running CTFs your team is in."""
+        """Show currently running CTFs your team is in (with time left)."""
         team_doc = self._get_team_config(ctx.guild.id)
         if not team_doc:
             await ctx.send("No team set! Use `!ctftime setteam <team_id or url>` first.")
@@ -499,8 +509,7 @@ class CtfTime(commands.Cog):
         async with ctx.typing():
             events, team_name = self._get_team_events_full(ctx.guild.id)
 
-        now = datetime.utcnow()
-        unix_now = int(now.replace(tzinfo=timezone.utc).timestamp())
+        unix_now = int(datetime.now(tz=self.TZ).timestamp())
         running = [e for e in events if e["start"] < unix_now and e["end"] > unix_now]
 
         if not running:
@@ -511,99 +520,122 @@ class CtfTime(commands.Cog):
             return
 
         for ev in running:
-            await ctx.channel.send(embed=self._make_live_embed(ev))
-
-    @ctftime.command(aliases=["mynext"])
-    async def myupcoming(self, ctx: commands.Context, amount: int = 3):
-        """Show upcoming CTFs your team is registered for."""
-        team_doc = self._get_team_config(ctx.guild.id)
-        if not team_doc:
-            await ctx.send("No team set! Use `!ctftime setteam <team_id or url>` first.")
-            return
-
-        async with ctx.typing():
-            events, team_name = self._get_team_events(ctx.guild.id)
-
-        now = datetime.utcnow()
-        unix_now = int(now.replace(tzinfo=timezone.utc).timestamp())
-        future = [e for e in events if e["start"] > unix_now]
-        future.sort(key=lambda e: e["start"])
-
-        if not future:
-            await ctx.send(f"No upcoming CTFs found for **{team_name}**.")
-            return
-
-        for ev in future[:amount]:
-            await ctx.channel.send(embed=self._make_upcoming_embed(ev))
-
-    @ctftime.command()
-    async def mytimeleft(self, ctx: commands.Context):
-        """Show time remaining for currently running CTFs your team is in."""
-        team_doc = self._get_team_config(ctx.guild.id)
-        if not team_doc:
-            await ctx.send("No team set! Use `!ctftime setteam <team_id or url>` first.")
-            return
-
-        async with ctx.typing():
-            events, team_name = self._get_team_events_full(ctx.guild.id)
-
-        now = datetime.utcnow()
-        unix_now = int(now.replace(tzinfo=timezone.utc).timestamp())
-        running = [e for e in events if e["start"] < unix_now and e["end"] > unix_now]
-
-        if not running:
-            await ctx.send(
-                f"No CTFs currently running for **{team_name}**! "
-                f"Use `!ctftime mycountdown` to see countdowns."
-            )
-            return
-
-        for ev in running:
             tl = self._format_timeleft(ev["end"] - unix_now)
-            await ctx.send(f"```ini\n{ev['name']} ends in: {tl}```\n{ev['url']}")
+            embed = self._make_live_embed(ev)
+            embed.add_field(name="Time left", value=tl, inline=False)
+            await ctx.channel.send(embed=embed)
 
-    @ctftime.command()
-    async def mycountdown(self, ctx: commands.Context, params: str = None):
-        """Show countdown to your team's upcoming CTFs."""
+    @ctftime.command(aliases=["mynext", "myctf", "myctfs", "registered"])
+    async def myupcoming(self, ctx: commands.Context, params: str = None):
+        """Show upcoming CTFs your team is registered for, with countdowns.
+
+        Usage:
+          !ctftime myupcoming        — list upcoming CTFs
+          !ctftime myupcoming <num>   — show countdown for that CTF
+          !ctftime myupcoming all     — show all upcoming CTFs
+        """
         team_doc = self._get_team_config(ctx.guild.id)
         if not team_doc:
             await ctx.send("No team set! Use `!ctftime setteam <team_id or url>` first.")
             return
 
-        now = datetime.utcnow()
-        unix_now = int(now.replace(tzinfo=timezone.utc).timestamp())
+        unix_now = int(datetime.now(tz=self.TZ).timestamp())
 
-        if params is None:
-            async with ctx.typing():
-                events, team_name = self._get_team_events(ctx.guild.id)
-
-            self.my_upcoming_l = [e for e in events if e["start"] > unix_now]
-            self.my_upcoming_l.sort(key=lambda e: e["start"])
-
+        # If a number was given, show countdown for that entry
+        if params is not None and params.isdigit():
             if not self.my_upcoming_l:
-                await ctx.send(f"No upcoming CTFs found for **{team_name}**.")
-                return
-
-            index = ""
-            for i, c in enumerate(self.my_upcoming_l):
-                index += f"\n[{i + 1}] {c['name']}\n"
-            await ctx.send(
-                f"**{team_name}**'s upcoming CTFs — type `!ctftime mycountdown <number>` to select."
-                f"\n```ini\n{index}```"
-            )
-        else:
-            if not self.my_upcoming_l:
-                await ctx.send("Run `!ctftime mycountdown` first to load the list.")
+                await ctx.send("Run `!ctftime myupcoming` first to load the list.")
                 return
             try:
                 x = int(params) - 1
-                tl = self._format_timeleft(self.my_upcoming_l[x]["start"] - unix_now)
+                ev = self.my_upcoming_l[x]
+                tl = self._format_timeleft(ev["start"] - unix_now)
                 await ctx.send(
-                    f"```ini\n{self.my_upcoming_l[x]['name']} starts in: {tl}```"
-                    f"\n{self.my_upcoming_l[x]['url']}"
+                    f"```ini\n{ev['name']} starts in: {tl}```\n{ev['url']}"
                 )
             except (IndexError, ValueError):
-                await ctx.send("Invalid selection. Use `!ctftime mycountdown` to see the list first.")
+                await ctx.send("Invalid selection. Use `!ctftime myupcoming` to see the list.")
+            return
+
+        # Fetch & filter
+        async with ctx.typing():
+            events, team_name = self._get_team_events(ctx.guild.id)
+
+        future = [e for e in events if e["start"] > unix_now or e["start"] == 0]
+        future.sort(key=lambda e: e["start"] if e["start"] else float("inf"))
+        self.my_upcoming_l = future  # store for countdown selection
+
+        if not future:
+            await ctx.send(
+                f"No upcoming CTFs found for **{team_name}**."
+                f"\nCheck the team page: https://ctftime.org/team/{team_doc['team_id']}"
+            )
+            return
+
+        show_all = params and params.lower() == "all"
+        to_show = future if show_all else future[:10]
+
+        embed = discord.Embed(
+            title=f"\U0001f4c5 Upcoming CTFs for {team_name}",
+            description=f"[Team page](https://ctftime.org/team/{team_doc['team_id']})",
+            color=int("f23a55", 16),
+        )
+        for i, ev in enumerate(to_show):
+            date_display = ev.get("date_str", "")
+            if ev["start"] > unix_now:
+                countdown = self._format_timeleft(ev["start"] - unix_now)
+            else:
+                countdown = "Date unknown"
+            embed.add_field(
+                name=f"[{i + 1}] {ev['name']}",
+                value=f"[CTFtime]({ev['url']})\n{date_display}\n\u23f1 {countdown}",
+                inline=False,
+            )
+        embed.set_footer(
+            text="Use !ctftime myupcoming <number> for exact countdown"
+        )
+        await ctx.send(embed=embed)
+
+    @ctftime.command(aliases=["mypast", "myhistory"])
+    async def myarchive(self, ctx: commands.Context):
+        """Show past CTFs your team participated in."""
+        team_doc = self._get_team_config(ctx.guild.id)
+        if not team_doc:
+            await ctx.send("No team set! Use `!ctftime setteam <team_id or url>` first.")
+            return
+
+        team_id = team_doc["team_id"]
+        team_name = team_doc.get("team_name", "Your team")
+
+        async with ctx.typing():
+            events = self._scrape_team_past_events(team_id)
+
+        if not events:
+            await ctx.send(
+                f"No past CTFs found for **{team_name}**."
+                f"\nCheck the team page: https://ctftime.org/team/{team_id}"
+            )
+            return
+
+        # Split into pages of 10
+        pages = [events[i:i + 10] for i in range(0, len(events), 10)]
+
+        for page_num, page in enumerate(pages[:3]):  # max 3 pages (30 events)
+            embed = discord.Embed(
+                title=f"\U0001f3c6 Past CTFs for {team_name}" + (f" (page {page_num + 1})" if len(pages) > 1 else ""),
+                description=f"[Team page](https://ctftime.org/team/{team_id})",
+                color=int("36a2eb", 16),
+            )
+            for ev in page:
+                place = ev.get("place", "?")
+                rating = ev.get("rating_points", "0")
+                embed.add_field(
+                    name=f"#{place} — {ev['name']}",
+                    value=f"[CTFtime]({ev['url']}) | Rating: **{rating}** pts",
+                    inline=False,
+                )
+            embed.set_footer(text="Data from ctftime.org")
+            await ctx.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):
