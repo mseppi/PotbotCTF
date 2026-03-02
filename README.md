@@ -72,5 +72,3 @@ Push to `main` → GitHub webhook hits `/github-webhook` on port 5001 → `updat
 ## Commands
 
 - `!ping` — Check bot latency
-
-test commit
