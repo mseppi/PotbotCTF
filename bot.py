@@ -14,7 +14,21 @@ class MyBot(commands.Bot):
 
     async def setup_hook(self):
         # Load cogs
-        await self.load_extension("cogs.general")
+        cog_list = [
+            "cogs.general",
+            "cogs.cipher",
+            "cogs.encoding",
+            "cogs.utility",
+            "cogs.configuration",
+            "cogs.ctf",
+            "cogs.ctftime",
+        ]
+        for cog in cog_list:
+            try:
+                await self.load_extension(cog)
+                print(f"  ✅ Loaded {cog}")
+            except Exception as e:
+                print(f"  ❌ Failed to load {cog}: {e}")
 
         # Sync slash commands
         await self.tree.sync()
