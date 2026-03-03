@@ -15,3 +15,5 @@ Discord bot with auto-update via GitHub webhooks.
 Push to `main` → GitHub webhook → `update_bot.sh` pulls & restarts → bot posts commit message to Discord.
 
 !help for commands
+
+Credits to https://github.com/NullPxl/NullCTF please check it out
