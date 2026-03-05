@@ -1,6 +1,8 @@
 import discord
 from discord.ext import commands
+import asyncio
 import string
+import re
 import requests
 import traceback
 from db import serverdb, teamdb
@@ -39,10 +41,6 @@ class NonceNotFound(Exception):
 
 def getChallenges(url, username, password):
     """Pull challenges from a CTFd platform using provided credentials."""
-    whitelist = set(
-        string.ascii_letters + string.digits + " " + "-" + "!" + "#" + "_"
-        + "[" + "]" + "(" + ")" + "?" + "@" + "+" + "<" + ">"
-    )
     fingerprint = "Powered by CTFd"
     s = requests.session()
     if url[-1] == "/":
@@ -71,25 +69,61 @@ def getChallenges(url, username, password):
             r_solves = s.get(f"{url}/api/v1/users/me/solves")
             team_solves = r_solves.json()
 
-        solves = []
+        solved_ids = set()
         if team_solves["success"]:
             for solve in team_solves["data"]:
-                cat = solve["challenge"]["category"]
-                challname = solve["challenge"]["name"]
-                solves.append(f"<{cat}> {challname}")
+                solved_ids.add(solve["challenge"]["id"])
+        
         challenges = {}
         if all_challenges["success"]:
             for chal in all_challenges["data"]:
+                chal_id = chal["id"]
                 cat = chal["category"]
                 challname = chal["name"]
-                name = f"<{cat}> {challname}"
-                if name not in solves:
-                    challenges[strip_string(name, whitelist)] = "Unsolved"
-                else:
-                    challenges[strip_string(name, whitelist)] = "Solved"
+                description = chal.get("description", "")
+                value = chal.get("value", 0)
+                
+                status = "Solved" if chal_id in solved_ids else "Unsolved"
+                
+                challenges[str(chal_id)] = {
+                    "id": chal_id,
+                    "name": challname,
+                    "category": cat,
+                    "description": description,
+                    "value": value,
+                    "status": status
+                }
         else:
             raise Exception("Error making request")
-        return challenges
+        return challenges, s, url
+
+
+def submitFlag(session, base_url, challenge_id, flag):
+    """Submit a flag to CTFd. Returns (correct: bool, message: str)."""
+    # Fetch a page to extract the csrfNonce (required for POST API calls)
+    r = session.get(f"{base_url}/challenges")
+    try:
+        nonce = r.text.split("csrfNonce': \"")[1].split('"')[0]
+    except Exception:
+        try:
+            nonce = r.text.split('name="nonce" value="')[1].split('">')[0]
+        except Exception:
+            raise NonceNotFound("Could not find CSRF nonce for flag submission.")
+    resp = session.post(
+        f"{base_url}/api/v1/challenges/attempt",
+        json={"challenge_id": challenge_id, "submission": flag},
+        headers={"Csrf-Token": nonce, "Content-Type": "application/json"},
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        return False, f"Unexpected response (HTTP {resp.status_code}). The CTF may have ended or the platform rejected the request."
+    if data.get("success"):
+        result = data["data"]
+        status = result.get("status", "")
+        message = result.get("message", "")
+        return status == "correct", message
+    return False, data.get("message", "Submission failed.")
 
 
 class CTF(commands.Cog):
@@ -286,14 +320,19 @@ class CTF(commands.Cog):
             except CredentialsNotFound as cnfm:
                 await ctx.send(cnfm)
                 return
-            ctfd_challs = getChallenges(url, user_pass[0], user_pass[1])
+            ctfd_challs, session, base_url = getChallenges(url, user_pass[0], user_pass[1])
             ctf = teamdb[str(ctx.guild.id)].find_one({"name": str(ctx.message.channel)})
             try:
                 challenges = ctf["challenges"]
                 challenges.update(ctfd_challs)
             except:
                 challenges = ctfd_challs
-            ctf_info = {"name": str(ctx.message.channel), "challenges": challenges}
+            ctf_info = {
+                "name": str(ctx.message.channel), 
+                "challenges": challenges,
+                "ctf_url": url,
+                "ctf_creds": {"username": user_pass[0], "password": user_pass[1]}
+            }
             teamdb[str(ctx.guild.id)].update(
                 {"name": str(ctx.message.channel)}, {"$set": ctf_info}, upsert=True
             )
@@ -357,22 +396,390 @@ class CTF(commands.Cog):
                 challenge_page += c
         return challenge_pages
 
+    @staticmethod
+    def find_challenge(ctf, identifier):
+        """Find a challenge by ID number or partial name match. Returns (key, data) or None."""
+        challenges = ctf.get("challenges", {})
+        # Try exact ID match first
+        if str(identifier) in challenges:
+            c = challenges[str(identifier)]
+            if isinstance(c, dict):
+                return str(identifier), c
+        # Try matching by name (case-insensitive partial match)
+        identifier_lower = str(identifier).lower()
+        for key, val in challenges.items():
+            if isinstance(val, dict):
+                if identifier_lower in val.get("name", "").lower():
+                    return key, val
+            else:
+                if identifier_lower in key.lower():
+                    return key, val
+        return None
+
     @challenge.command(aliases=["ls", "l"])
     @in_ctf_channel()
     async def list(self, ctx: commands.Context):
-        """List challenges in the current CTF."""
+        """List challenges in the current CTF (with IDs and points)."""
         server = teamdb[str(ctx.guild.id)]
         ctf = server.find_one({"name": str(ctx.message.channel)})
         try:
+            challenges = ctf["challenges"]
+            if not challenges:
+                raise KeyError
             ctf_challenge_list = []
-            for k, v in ctf["challenges"].items():
-                challenge = f"[{k}]: {v}\n"
-                ctf_challenge_list.append(challenge)
+            for k, v in challenges.items():
+                if isinstance(v, dict):
+                    # Rich challenge data from pull
+                    pts = v.get('value', '?')
+                    status = v.get('status', 'Unknown')
+                    icon = '\u2705' if 'Solved' in status else ('\U0001f527' if 'Working' in status else '\u274c')
+                    line = f"{icon} [{k}] <{v.get('category', '?')}> {v['name']} ({pts} pts) - {status}\n"
+                else:
+                    # Legacy format (manually added)
+                    icon = '\u2705' if 'Solved' in str(v) else ('\U0001f527' if 'Working' in str(v) else '\u274c')
+                    line = f"{icon} [{k}]: {v}\n"
+                ctf_challenge_list.append(line)
             for page in CTF.gen_page(ctf_challenge_list):
-                await ctx.send(f"```ini\n{page}```")
+                await ctx.send(f"```{page}```")
         except KeyError:
-            await ctx.send('Add some challenges with `!ctf challenge add "challenge name"`')
+            await ctx.send('No challenges yet. Use `!ctf challenge pull <url>` or `!ctf challenge add "name"`')
         except:
+            traceback.print_exc()
+
+    @challenge.command(aliases=["i", "show"])
+    @in_ctf_channel()
+    async def info(self, ctx: commands.Context, *, identifier: str):
+        """Show full details of a challenge by ID or name. Usage: !ctf challenge info <id or name>"""
+        ctf = teamdb[str(ctx.guild.id)].find_one({"name": str(ctx.message.channel)})
+        if not ctf or "challenges" not in ctf:
+            await ctx.send("No challenges found. Pull challenges first.")
+            return
+        result = CTF.find_challenge(ctf, identifier)
+        if result is None:
+            await ctx.send(f"Challenge `{identifier}` not found. Use `!ctf challenge list` to see available challenges.")
+            return
+        key, val = result
+        if not isinstance(val, dict) or "id" not in val:
+            await ctx.send(f"**{key}**: {val}")
+            return
+
+        # Fetch full challenge details from CTFd (description, files, etc.)
+        ctf_url = ctf.get("ctf_url")
+        ctf_creds = ctf.get("ctf_creds")
+        desc = val.get("description", "") or ""
+        files = []
+        hints = []
+        if ctf_url and ctf_creds:
+            try:
+                _, session, base_url = getChallenges(ctf_url, ctf_creds["username"], ctf_creds["password"])
+                r = session.get(f"{base_url}/api/v1/challenges/{val['id']}")
+                detail = r.json()
+                if detail.get("success"):
+                    chal_data = detail["data"]
+                    desc = chal_data.get("description", desc)
+                    files = chal_data.get("files", [])
+                    hints = chal_data.get("hints", [])
+                    # Update stored data with full description
+                    challenges = ctf.get("challenges", {})
+                    if key in challenges and isinstance(challenges[key], dict):
+                        challenges[key]["description"] = desc
+                        challenges[key]["files"] = files
+                        challenges[key]["hints"] = hints
+                        teamdb[str(ctx.guild.id)].update(
+                            {"name": str(ctx.message.channel)},
+                            {"$set": {"challenges": challenges}},
+                            upsert=True,
+                        )
+            except Exception:
+                pass  # Fall back to stored data
+
+        # Strip HTML tags from description
+        desc = re.sub(r'<[^>]+>', '', desc).strip()
+        if not desc:
+            desc = "No description"
+        if len(desc) > 1500:
+            desc = desc[:1500] + "..."
+
+        embed = discord.Embed(
+            title=f"{val.get('name', key)}",
+            description=desc,
+            color=discord.Color.green() if 'Solved' in val.get('status', '') else discord.Color.red(),
+        )
+        embed.add_field(name="Category", value=val.get('category', '?'), inline=True)
+        embed.add_field(name="Points", value=str(val.get('value', '?')), inline=True)
+        embed.add_field(name="Status", value=val.get('status', 'Unknown'), inline=True)
+        embed.add_field(name="ID", value=str(val.get('id', key)), inline=True)
+
+        # Add attachment/file links
+        if files:
+            file_links = []
+            for f in files:
+                if f.startswith("http"):
+                    file_url = f
+                else:
+                    file_url = f"{ctf_url}{f}" if ctf_url else f
+                filename = f.split("/")[-1].split("?")[0]
+                file_links.append(f"[{filename}]({file_url})")
+            embed.add_field(name="Attachments", value="\n".join(file_links), inline=False)
+
+        # Add hints
+        if hints:
+            hint_lines = []
+            for i, h in enumerate(hints, 1):
+                if isinstance(h, dict):
+                    content = h.get("content") or h.get("html", "")
+                    cost = h.get("cost", 0)
+                    if content:
+                        clean = re.sub(r'<[^>]+>', '', content).strip()
+                        hint_lines.append(f"**Hint {i}** (cost: {cost}): {clean}")
+                    else:
+                        hint_lines.append(f"**Hint {i}** (cost: {cost}): *Locked — unlock on CTFd*")
+                elif isinstance(h, str):
+                    hint_lines.append(f"**Hint {i}**: {h}")
+            if hint_lines:
+                embed.add_field(name="Hints", value="\n".join(hint_lines), inline=False)
+
+        await ctx.send(embed=embed)
+
+    @challenge.command(aliases=["hints", "h"])
+    @in_ctf_channel()
+    async def hint(self, ctx: commands.Context, identifier: str, hint_num: int = None):
+        """View or unlock a hint. Usage: !ctf challenge hint <id or name> [hint_number]"""
+        ctf = teamdb[str(ctx.guild.id)].find_one({"name": str(ctx.message.channel)})
+        if not ctf or "challenges" not in ctf:
+            await ctx.send("No challenges found. Pull challenges first.")
+            return
+        result = CTF.find_challenge(ctf, identifier)
+        if result is None:
+            await ctx.send(f"Challenge `{identifier}` not found.")
+            return
+        key, val = result
+        if not isinstance(val, dict) or "id" not in val:
+            await ctx.send("This challenge has no CTFd data.")
+            return
+
+        ctf_url = ctf.get("ctf_url")
+        ctf_creds = ctf.get("ctf_creds")
+        if not ctf_url or not ctf_creds:
+            await ctx.send("No CTF URL or credentials stored. Run `!ctf challenge pull <url>` first.")
+            return
+
+        try:
+            _, session, base_url = getChallenges(ctf_url, ctf_creds["username"], ctf_creds["password"])
+            # Fetch the CSRF nonce for POST requests
+            page = session.get(f"{base_url}/challenges")
+            try:
+                nonce = page.text.split("csrfNonce': \"")[1].split('"')[0]
+            except Exception:
+                nonce = ""
+
+            # Get challenge details for hints
+            r = session.get(f"{base_url}/api/v1/challenges/{val['id']}")
+            detail = r.json()
+            if not detail.get("success"):
+                await ctx.send("Failed to fetch challenge details.")
+                return
+            hints = detail["data"].get("hints", [])
+            if not hints:
+                await ctx.send("This challenge has no hints.")
+                return
+
+            # If no hint number specified, list all hints
+            if hint_num is None:
+                hint_lines = []
+                for i, h in enumerate(hints, 1):
+                    if isinstance(h, dict):
+                        content = h.get("content") or h.get("html", "")
+                        cost = h.get("cost", 0)
+                        if content:
+                            clean = re.sub(r'<[^>]+>', '', content).strip()
+                            hint_lines.append(f"**Hint {i}** (cost: {cost}): {clean}")
+                        else:
+                            hint_lines.append(f"**Hint {i}** (cost: {cost}): 🔒 *Locked* — use `!ctf challenge hint {identifier} {i}` to unlock")
+                    elif isinstance(h, str):
+                        hint_lines.append(f"**Hint {i}**: {h}")
+                await ctx.send("\n".join(hint_lines))
+                return
+
+            # Specific hint requested
+            if hint_num < 1 or hint_num > len(hints):
+                await ctx.send(f"Invalid hint number. This challenge has {len(hints)} hint(s).")
+                return
+            h = hints[hint_num - 1]
+            if not isinstance(h, dict):
+                await ctx.send(f"**Hint {hint_num}**: {h}")
+                return
+
+            hint_id = h.get("id")
+            content = h.get("content") or h.get("html", "")
+            cost = h.get("cost", 0)
+
+            # If already unlocked, just show it
+            if content:
+                clean = re.sub(r'<[^>]+>', '', content).strip()
+                await ctx.send(f"**Hint {hint_num}** (cost: {cost}): {clean}")
+                return
+
+            # Locked — ask for confirmation
+            confirm_msg = await ctx.send(
+                f"🔒 **Hint {hint_num}** costs **{cost} points** to unlock. React ✅ to confirm or ❌ to cancel."
+            )
+            await confirm_msg.add_reaction("✅")
+            await confirm_msg.add_reaction("❌")
+
+            def check(reaction, user):
+                return (
+                    user == ctx.message.author
+                    and str(reaction.emoji) in ("✅", "❌")
+                    and reaction.message.id == confirm_msg.id
+                )
+
+            try:
+                reaction, user = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
+            except asyncio.TimeoutError:
+                await ctx.send("⏰ Hint unlock timed out.")
+                return
+
+            if str(reaction.emoji) == "❌":
+                await ctx.send("Hint unlock cancelled.")
+                return
+
+            # Unlock the hint via CTFd API
+            resp = session.post(
+                f"{base_url}/api/v1/unlocks",
+                json={"target": hint_id, "type": "hints"},
+                headers={"Csrf-Token": nonce, "Content-Type": "application/json"},
+            )
+            try:
+                unlock_data = resp.json()
+            except Exception:
+                await ctx.send(f"Unexpected response from CTFd (HTTP {resp.status_code}).")
+                return
+
+            if unlock_data.get("success"):
+                # Fetch the now-unlocked hint content
+                hint_resp = session.get(f"{base_url}/api/v1/hints/{hint_id}")
+                try:
+                    hint_detail = hint_resp.json()
+                    if hint_detail.get("success"):
+                        content = hint_detail["data"].get("content") or hint_detail["data"].get("html", "")
+                        clean = re.sub(r'<[^>]+>', '', content).strip()
+                        await ctx.send(f"🔓 **Hint {hint_num}** unlocked!\n{clean}")
+                    else:
+                        await ctx.send("🔓 Hint unlocked but could not fetch content.")
+                except Exception:
+                    await ctx.send("🔓 Hint unlocked but could not parse response.")
+            else:
+                msg = unlock_data.get("errors", unlock_data.get("message", "Unknown error"))
+                await ctx.send(f"❌ Failed to unlock hint: {msg}")
+
+        except InvalidCredentials:
+            await ctx.send("Stored credentials are invalid. Update them with `!ctf setcreds`.")
+        except Exception as e:
+            await ctx.send(f"Error: {e}")
+            traceback.print_exc()
+
+    @challenge.command(aliases=["flag", "sub"])
+    @in_ctf_channel()
+    async def submit(self, ctx: commands.Context, identifier: str, *, flag: str):
+        """Submit a flag for a challenge. Usage: !ctf challenge submit <id or name> <flag>"""
+        ctf = teamdb[str(ctx.guild.id)].find_one({"name": str(ctx.message.channel)})
+        if not ctf:
+            await ctx.send("No CTF data found.")
+            return
+        # Find the challenge
+        result = CTF.find_challenge(ctf, identifier)
+        if result is None:
+            await ctx.send(f"Challenge `{identifier}` not found. Use `!ctf challenge list` to see available challenges.")
+            return
+        key, val = result
+        if not isinstance(val, dict) or "id" not in val:
+            await ctx.send("This challenge was added manually and has no CTFd ID. Cannot submit remotely.")
+            return
+        chal_id = val["id"]
+        # Get CTF URL and creds
+        ctf_url = ctf.get("ctf_url")
+        ctf_creds = ctf.get("ctf_creds")
+        if not ctf_url or not ctf_creds:
+            # Fall back to pinned creds
+            try:
+                pinned = await ctx.message.channel.pins()
+                user_pass = CTF.get_creds(pinned)
+                ctf_creds = {"username": user_pass[0], "password": user_pass[1]}
+            except CredentialsNotFound:
+                await ctx.send("No CTF URL or credentials stored. Run `!ctf challenge pull <url>` first.")
+                return
+            if not ctf_url:
+                await ctx.send("No CTF URL stored. Run `!ctf challenge pull <url>` first.")
+                return
+        try:
+            # Reuse getChallenges to get an authenticated session
+            _, session, base_url = getChallenges(ctf_url, ctf_creds["username"], ctf_creds["password"])
+            correct, message = submitFlag(session, base_url, chal_id, flag)
+            if correct:
+                # Update status in DB
+                challenges = ctf.get("challenges", {})
+                if key in challenges and isinstance(challenges[key], dict):
+                    challenges[key]["status"] = f"Solved - {str(ctx.message.author)}"
+                teamdb[str(ctx.guild.id)].update(
+                    {"name": str(ctx.message.channel)},
+                    {"$set": {"challenges": challenges}},
+                    upsert=True,
+                )
+                await ctx.send(f":triangular_flag_on_post: **Correct!** `{val['name']}` solved by `{ctx.message.author}`\n{message}")
+            else:
+                await ctx.send(f":x: **Incorrect.** {message}")
+        except InvalidCredentials:
+            await ctx.send("Stored credentials are invalid. Update them with `!ctf setcreds`.")
+        except InvalidProvider:
+            await ctx.send("CTF platform is not CTFd-based.")
+        except Exception as e:
+            await ctx.send(f"Error submitting flag: {e}")
+            traceback.print_exc()
+
+    @ctf.command(aliases=["notifs", "noti"])
+    @in_ctf_channel()
+    async def notifications(self, ctx: commands.Context, count: int = 5):
+        """Show latest CTFd notifications. Usage: !ctf notifications [count]"""
+        ctf = teamdb[str(ctx.guild.id)].find_one({"name": str(ctx.message.channel)})
+        if not ctf:
+            await ctx.send("No CTF data found.")
+            return
+        ctf_url = ctf.get("ctf_url")
+        ctf_creds = ctf.get("ctf_creds")
+        if not ctf_url or not ctf_creds:
+            await ctx.send("No CTF URL or credentials stored. Run `!ctf challenge pull <url>` first.")
+            return
+        count = max(1, min(count, 20))
+        try:
+            _, session, base_url = getChallenges(ctf_url, ctf_creds["username"], ctf_creds["password"])
+            r = session.get(f"{base_url}/api/v1/notifications")
+            data = r.json()
+            if not data.get("success"):
+                await ctx.send("Failed to fetch notifications.")
+                return
+            notifs = data.get("data", [])
+            if not notifs:
+                await ctx.send("No notifications.")
+                return
+            # Show latest N (API typically returns newest first)
+            for n in notifs[:count]:
+                title = n.get("title", "Untitled")
+                content = n.get("content", "") or ""
+                content = re.sub(r'<[^>]+>', '', content).strip()
+                date = n.get("date", "")
+                embed = discord.Embed(
+                    title=f"📢 {title}",
+                    description=content[:2000] if content else "No content",
+                    color=discord.Color.blue(),
+                )
+                if date:
+                    embed.set_footer(text=date)
+                await ctx.send(embed=embed)
+        except InvalidCredentials:
+            await ctx.send("Stored credentials are invalid. Update them with `!ctf setcreds`.")
+        except Exception as e:
+            await ctx.send(f"Error fetching notifications: {e}")
             traceback.print_exc()
 
 
