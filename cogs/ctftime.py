@@ -281,8 +281,8 @@ class CtfTime(commands.Cog):
             description=ctf["url"],
             color=15874645,
         )
-        start = datetime.utcfromtimestamp(ctf["start"]).strftime("%Y-%m-%d %H:%M:%S") + " UTC"
-        end = datetime.utcfromtimestamp(ctf["end"]).strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+        start = datetime.fromtimestamp(ctf["start"], tz=self.TZ).strftime("%Y-%m-%d %H:%M:%S") + " +2"
+        end = datetime.fromtimestamp(ctf["end"], tz=self.TZ).strftime("%Y-%m-%d %H:%M:%S") + " +2"
         embed.set_thumbnail(url=ctf["img"] or self.DEFAULT_IMAGE)
         embed.add_field(name="Duration", value=ctf["dur"], inline=True)
         embed.add_field(name="Format", value=ctf["format"], inline=True)
@@ -295,8 +295,8 @@ class CtfTime(commands.Cog):
         embed.set_thumbnail(url=ctf["img"] or self.DEFAULT_IMAGE)
         embed.add_field(name="Duration", value=ctf["dur"], inline=True)
         embed.add_field(name="Format", value=ctf["format"], inline=True)
-        start = datetime.utcfromtimestamp(ctf["start"]).strftime("%Y-%m-%d %H:%M:%S") + " UTC"
-        end = datetime.utcfromtimestamp(ctf["end"]).strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+        start = datetime.fromtimestamp(ctf["start"], tz=self.TZ).strftime("%Y-%m-%d %H:%M:%S") + " +2"
+        end = datetime.fromtimestamp(ctf["end"], tz=self.TZ).strftime("%Y-%m-%d %H:%M:%S") + " +2"
         embed.add_field(name="Timeframe", value=f"{start} -> {end}", inline=True)
         return embed
 
