@@ -67,9 +67,9 @@ class CtfTime(commands.Cog):
                     event_id = int(m.group(1))
                     date_str = cols[1].get_text(strip=True)
                     # Parse date like "March 27, 2026, 7 p.m." or "Feb. 18, 2026, 2 a.m."
-                    # CTFtime shows dates in the user's profile TZ; we treat them as UTC+2
+                    # Treat as UTC for consistency with countdown logic
                     try:
-                        unix_start = int(parse(date_str).replace(tzinfo=self.TZ).timestamp())
+                        unix_start = int(parse(date_str).replace(tzinfo=timezone.utc).timestamp())
                     except Exception:
                         unix_start = 0
                     events.append({
