@@ -581,7 +581,9 @@ class CtfTime(commands.Cog):
             color=int("f23a55", 16),
         )
         for i, ev in enumerate(to_show):
-            date_display = ev.get("date_str", "")
+            # Convert event start time to UTC+2 for display
+            start_dt = datetime.fromtimestamp(ev["start"], tz=self.TZ)
+            date_display = start_dt.strftime("%b %d, %Y, %H:%M") + " (UTC+2)"
             countdown = self._format_timeleft(ev["start"] - unix_now)
             embed.add_field(
                 name=f"[{i + 1}] {ev['name']}",
