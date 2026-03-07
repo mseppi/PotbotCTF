@@ -539,7 +539,7 @@ class CtfTime(commands.Cog):
             await ctx.send("No team set! Use `!ctftime setteam <team_id or url>` first.")
             return
 
-        unix_now = int(datetime.now(tz=self.TZ).timestamp())
+        unix_now = int(datetime.utcnow().replace(tzinfo=timezone.utc).timestamp())
 
         # If a number was given, show countdown for that entry
         if params is not None and params.isdigit():
