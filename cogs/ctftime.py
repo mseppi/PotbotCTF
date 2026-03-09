@@ -83,10 +83,11 @@ class CtfTime(commands.Cog):
                 break  # Only process the first matching table
         return events
 
-    def _scrape_team_past_events(self, team_id: int) -> list[dict]:
+    def _scrape_team_past_events(self, team_id: int, year: int = None) -> list[dict]:
         """Scrape past participated events from the CTFtime team page.
 
         Returns a list of dicts: name, url, event_id, place, ctf_points, rating_points.
+        If year is given, only returns events from that year's tab.
         """
         try:
             r = requests.get(f"https://ctftime.org/team/{team_id}", headers=self.HEADERS)
@@ -103,7 +104,13 @@ class CtfTime(commands.Cog):
                 tab_content = header.find_next("div", class_="tab-content")
                 if not tab_content:
                     continue
-                for table in tab_content.find_all("table", class_="table"):
+                # Each year is a tab-pane; IDs like "year_2025" or just iterate tables
+                if year is not None:
+                    pane = tab_content.find("div", id=re.compile(rf"year[_\-]?{year}", re.I))
+                    tables = pane.find_all("table", class_="table") if pane else []
+                else:
+                    tables = tab_content.find_all("table", class_="table")
+                for table in tables:
                     for row in table.find_all("tr"):
                         cols = row.find_all("td")
                         if len(cols) < 4:
@@ -635,6 +642,58 @@ class CtfTime(commands.Cog):
                 )
             embed.set_footer(text="Data from ctftime.org")
             await ctx.send(embed=embed)
+
+
+    @ctftime.command(aliases=["mybest", "myscores"])
+    async def mytop(self, ctx: commands.Context, year: str = None):
+        """Show your team's top 10 events by rating points for the current year."""
+        team_doc = self._get_team_config(ctx.guild.id)
+        if not team_doc:
+            await ctx.send("No team set! Use `!ctftime setteam <team_id or url>` first.")
+            return
+
+        if year is None:
+            year = str(datetime.today().year)
+
+        team_id = team_doc["team_id"]
+        team_name = team_doc.get("team_name", "Your team")
+
+        async with ctx.typing():
+            events = self._scrape_team_past_events(team_id, year=int(year))
+
+        if not events:
+            await ctx.send(
+                f"No past CTFs found for **{team_name}** in {year}. "
+                f"Check the team page: https://ctftime.org/team/{team_id}"
+            )
+            return
+
+        # Parse rating points and sort descending
+        def parse_pts(val: str) -> float:
+            try:
+                return float(val.replace(",", "."))
+            except (ValueError, AttributeError):
+                return 0.0
+
+        events.sort(key=lambda e: parse_pts(e["rating_points"]), reverse=True)
+        top10 = events[:10]
+        total = sum(parse_pts(e["rating_points"]) for e in top10)
+
+        embed = discord.Embed(
+            title=f"\U0001f3c6 {team_name} — Top {len(top10)} Events ({year})",
+            description=f"[Team page](https://ctftime.org/team/{team_id})",
+            color=int("f5a623", 16),
+        )
+        for i, ev in enumerate(top10):
+            pts = parse_pts(ev["rating_points"])
+            place = ev.get("place", "?")
+            embed.add_field(
+                name=f"[{i + 1}] {ev['name']}",
+                value=f"[CTFtime]({ev['url']}) | Place: **#{place}** | Rating pts: **{pts:.4f}**",
+                inline=False,
+            )
+        embed.set_footer(text=f"Total rating points (top {len(top10)}): {total:.4f}")
+        await ctx.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):
