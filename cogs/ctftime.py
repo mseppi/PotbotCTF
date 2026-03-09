@@ -106,7 +106,7 @@ class CtfTime(commands.Cog):
                     continue
                 # Each year is a tab-pane; IDs like "year_2025" or just iterate tables
                 if year is not None:
-                    pane = tab_content.find("div", id=re.compile(rf"year[_\-]?{year}", re.I))
+                    pane = tab_content.find("div", id=re.compile(rf"rating[_\-]?{year}", re.I))
                     tables = pane.find_all("table", class_="table") if pane else []
                 else:
                     tables = tab_content.find_all("table", class_="table")
