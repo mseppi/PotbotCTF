@@ -137,15 +137,21 @@ class CtfTime(commands.Cog):
         return events
 
     def _fetch_event_weight(self, event_id: int) -> float:
-        """Fetch the weight of an event from the CTFtime API."""
-        try:
-            r = requests.get(
-                f"https://ctftime.org/api/v1/events/{event_id}/", headers=self.HEADERS
-            )
-            if r.status_code == 200:
-                return float(r.json().get("weight", 0.0))
-        except Exception:
-            pass
+        """Fetch the weight of an event from the CTFtime API, with retries."""
+        import time
+        for attempt in range(3):
+            try:
+                r = requests.get(
+                    f"https://ctftime.org/api/v1/events/{event_id}/", headers=self.HEADERS,
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    return float(r.json().get("weight", 0.0))
+                if r.status_code == 429:
+                    time.sleep(1 + attempt)
+                    continue
+            except Exception:
+                pass
         return 0.0
 
     def _fetch_event_detail(self, event_id: int) -> dict | None:
@@ -673,30 +679,30 @@ class CtfTime(commands.Cog):
         async with ctx.typing():
             events = self._scrape_team_past_events(team_id, year=int(year))
 
-        if not events:
-            await ctx.send(
-                f"No past CTFs found for **{team_name}** in {year}. "
-                f"Check the team page: https://ctftime.org/team/{team_id}"
-            )
-            return
+            if not events:
+                await ctx.send(
+                    f"No past CTFs found for **{team_name}** in {year}. "
+                    f"Check the team page: https://ctftime.org/team/{team_id}"
+                )
+                return
 
-        # Parse rating points and sort descending
-        def parse_pts(val: str) -> float:
-            try:
-                return float(val.replace(",", "."))
-            except (ValueError, AttributeError):
-                return 0.0
+            # Parse rating points and sort descending
+            def parse_pts(val: str) -> float:
+                try:
+                    return float(val.replace(",", "."))
+                except (ValueError, AttributeError):
+                    return 0.0
 
-        events.sort(key=lambda e: parse_pts(e["rating_points"]), reverse=True)
-        top10 = events[:10]
-        total = sum(parse_pts(e["rating_points"]) for e in top10)
+            events.sort(key=lambda e: parse_pts(e["rating_points"]), reverse=True)
+            top10 = events[:10]
+            total = sum(parse_pts(e["rating_points"]) for e in top10)
 
-        # Fetch weights for top10 events in parallel
-        weights: list[float] = [0.0] * len(top10)
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = {pool.submit(self._fetch_event_weight, ev["event_id"]): i for i, ev in enumerate(top10)}
-            for fut in as_completed(futures):
-                weights[futures[fut]] = fut.result()
+            # Fetch weights for top10 events in parallel (low worker count to avoid rate limiting)
+            weights: list[float] = [0.0] * len(top10)
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                futures = {pool.submit(self._fetch_event_weight, ev["event_id"]): i for i, ev in enumerate(top10)}
+                for fut in as_completed(futures):
+                    weights[futures[fut]] = fut.result()
 
         embed = discord.Embed(
             title=f"\U0001f3c6 {team_name} — Top {len(top10)} Events ({year})",
