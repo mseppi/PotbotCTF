@@ -729,24 +729,22 @@ class CtfTime(commands.Cog):
         team_place: int,
         team_points: float,
         best_points: float,
-        total_teams: int,
         weight: float,
     ):
         """Calculate CTFtime rating points using the 2017+ formula.
 
-        Usage: !calculate <team_place> <team_points> <best_points> <total_teams> <weight>
+        Usage: !calculate <team_place> <team_points> <best_points> <weight>
 
         team_place   — your place in the CTF (1 = first)
         team_points  — points your team scored
         best_points  — points scored by the 1st place team
-        total_teams  — total number of teams that scored
         weight       — CTF weight from ctftime.org
         """
         if best_points <= 0:
             await ctx.send("best_points must be greater than 0.")
             return
-        if team_place <= 0 or total_teams <= 0:
-            await ctx.send("team_place and total_teams must be greater than 0.")
+        if team_place <= 0:
+            await ctx.send("team_place must be greater than 0.")
             return
 
         points_coef = team_points / best_points
@@ -763,14 +761,8 @@ class CtfTime(commands.Cog):
         if points_coef <= 0:
             embed.add_field(name="Estimated Rating", value="**0** (points_coef ≤ 0)", inline=False)
         else:
-            # E_rating = (points_coef + place_coef) * weight / (1 / (1 + team_place / total_teams))
-            normalizer = 1.0 / (1.0 + team_place / total_teams)
-            e_rating = (points_coef + place_coef) * weight / normalizer
-            embed.add_field(
-                name="normalizer",
-                value=f"`1 / (1 + {team_place}/{total_teams})` = **{normalizer:.4f}**",
-                inline=True,
-            )
+            # E_rating = (points_coef + place_coef) * weight
+            e_rating = (points_coef + place_coef) * weight
             embed.add_field(name="Estimated Rating", value=f"**{e_rating:.4f}**", inline=False)
 
         await ctx.send(embed=embed)
