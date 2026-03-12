@@ -136,6 +136,18 @@ class CtfTime(commands.Cog):
                 break
         return events
 
+    def _fetch_event_weight(self, event_id: int) -> float:
+        """Fetch the weight of an event from the CTFtime API."""
+        try:
+            r = requests.get(
+                f"https://ctftime.org/api/v1/events/{event_id}/", headers=self.HEADERS
+            )
+            if r.status_code == 200:
+                return float(r.json().get("weight", 0.0))
+        except Exception:
+            pass
+        return 0.0
+
     def _fetch_event_detail(self, event_id: int) -> dict | None:
         """Fetch a single event from the CTFtime API and return a normalized dict."""
         try:
@@ -679,6 +691,13 @@ class CtfTime(commands.Cog):
         top10 = events[:10]
         total = sum(parse_pts(e["rating_points"]) for e in top10)
 
+        # Fetch weights for top10 events in parallel
+        weights: list[float] = [0.0] * len(top10)
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(self._fetch_event_weight, ev["event_id"]): i for i, ev in enumerate(top10)}
+            for fut in as_completed(futures):
+                weights[futures[fut]] = fut.result()
+
         embed = discord.Embed(
             title=f"\U0001f3c6 {team_name} — Top {len(top10)} Events ({year})",
             description=f"[Team page](https://ctftime.org/team/{team_id})",
@@ -687,12 +706,67 @@ class CtfTime(commands.Cog):
         for i, ev in enumerate(top10):
             pts = parse_pts(ev["rating_points"])
             place = ev.get("place", "?")
+            w = weights[i]
             embed.add_field(
                 name=f"[{i + 1}] {ev['name']}",
-                value=f"[CTFtime]({ev['url']}) | Place: **#{place}** | Rating pts: **{pts:.4f}**",
+                value=f"[CTFtime]({ev['url']}) | Place: **#{place}** | Weight: **{w:.2f}** | Rating pts: **{pts:.4f}**",
                 inline=False,
             )
         embed.set_footer(text=f"Total rating points (top {len(top10)}): {total:.4f}")
+        await ctx.send(embed=embed)
+
+
+    @commands.command()
+    async def calculate(
+        self,
+        ctx: commands.Context,
+        team_place: int,
+        team_points: float,
+        best_points: float,
+        total_teams: int,
+        weight: float,
+    ):
+        """Calculate CTFtime rating points using the 2017+ formula.
+
+        Usage: !calculate <team_place> <team_points> <best_points> <total_teams> <weight>
+
+        team_place   — your place in the CTF (1 = first)
+        team_points  — points your team scored
+        best_points  — points scored by the 1st place team
+        total_teams  — total number of teams that scored
+        weight       — CTF weight from ctftime.org
+        """
+        if best_points <= 0:
+            await ctx.send("best_points must be greater than 0.")
+            return
+        if team_place <= 0 or total_teams <= 0:
+            await ctx.send("team_place and total_teams must be greater than 0.")
+            return
+
+        points_coef = team_points / best_points
+        place_coef = 1.0 / team_place
+
+        embed = discord.Embed(
+            title="\U0001f9ee CTFtime Rating Calculator (2017+ formula)",
+            color=int("f5a623", 16),
+        )
+        embed.add_field(name="points_coef", value=f"`{team_points} / {best_points}` = **{points_coef:.4f}**", inline=True)
+        embed.add_field(name="place_coef", value=f"`1 / {team_place}` = **{place_coef:.4f}**", inline=True)
+        embed.add_field(name="weight", value=f"**{weight}**", inline=True)
+
+        if points_coef <= 0:
+            embed.add_field(name="Estimated Rating", value="**0** (points_coef ≤ 0)", inline=False)
+        else:
+            # E_rating = (points_coef + place_coef) * weight / (1 / (1 + team_place / total_teams))
+            normalizer = 1.0 / (1.0 + team_place / total_teams)
+            e_rating = (points_coef + place_coef) * weight / normalizer
+            embed.add_field(
+                name="normalizer",
+                value=f"`1 / (1 + {team_place}/{total_teams})` = **{normalizer:.4f}**",
+                inline=True,
+            )
+            embed.add_field(name="Estimated Rating", value=f"**{e_rating:.4f}**", inline=False)
+
         await ctx.send(embed=embed)
 
 
