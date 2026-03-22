@@ -722,6 +722,73 @@ class CtfTime(commands.Cog):
         await ctx.send(embed=embed)
 
 
+    @ctftime.command(aliases=["ttop", "toptop"])
+    async def teamtop(self, ctx: commands.Context, team_input: str, year: str = None):
+        """Show any team's top 10 events by rating points.
+
+        Usage: !ctftime teamtop <team_id or url> [year]
+        """
+        team_id = team_input.strip().rstrip("/")
+        if "ctftime.org/team/" in team_id:
+            team_id = team_id.split("ctftime.org/team/")[1].split("/")[0].split("?")[0]
+        if not team_id.isdigit():
+            await ctx.send("Invalid team ID. Use a numeric ID or a URL like `https://ctftime.org/team/12345`")
+            return
+
+        if year is None:
+            year = str(datetime.today().year)
+
+        # Resolve team name from API
+        try:
+            r = requests.get(f"https://ctftime.org/api/v1/teams/{team_id}/", headers=self.HEADERS)
+            team_name = r.json().get("name", f"Team {team_id}") if r.status_code == 200 else f"Team {team_id}"
+        except Exception:
+            team_name = f"Team {team_id}"
+
+        async with ctx.typing():
+            events = self._scrape_team_past_events(int(team_id), year=int(year))
+
+            if not events:
+                await ctx.send(
+                    f"No past CTFs found for **{team_name}** in {year}. "
+                    f"Check the team page: https://ctftime.org/team/{team_id}"
+                )
+                return
+
+            def parse_pts(val: str) -> float:
+                try:
+                    return float(val.replace(",", "."))
+                except (ValueError, AttributeError):
+                    return 0.0
+
+            events.sort(key=lambda e: parse_pts(e["rating_points"]), reverse=True)
+            top10 = events[:10]
+            total = sum(parse_pts(e["rating_points"]) for e in top10)
+
+            weights: list[float] = [0.0] * len(top10)
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                futures = {pool.submit(self._fetch_event_weight, ev["event_id"]): i for i, ev in enumerate(top10)}
+                for fut in as_completed(futures):
+                    weights[futures[fut]] = fut.result()
+
+        embed = discord.Embed(
+            title=f"\U0001f3c6 {team_name} — Top {len(top10)} Events ({year})",
+            description=f"[Team page](https://ctftime.org/team/{team_id})",
+            color=int("36a2eb", 16),
+        )
+        for i, ev in enumerate(top10):
+            pts = parse_pts(ev["rating_points"])
+            place = ev.get("place", "?")
+            w = weights[i]
+            embed.add_field(
+                name=f"[{i + 1}] {ev['name']}",
+                value=f"[CTFtime]({ev['url']}) | Place: **#{place}** | Weight: **{w:.2f}** | Rating pts: **{pts:.4f}**",
+                inline=False,
+            )
+        embed.set_footer(text=f"Total rating points (top {len(top10)}): {total:.4f}")
+        await ctx.send(embed=embed)
+
+
     @commands.command()
     async def calculate(
         self,
