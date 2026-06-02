@@ -3,7 +3,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit
 
 # Use the deploy key so git pull works under systemd (no SSH agent)
-export GIT_SSH_COMMAND="ssh -i /home/mseppi/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"
+export GIT_SSH_COMMAND="ssh -i /home/p0t/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"
 
 git reset --hard
 git pull origin main

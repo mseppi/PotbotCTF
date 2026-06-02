@@ -22,9 +22,11 @@ def github_webhook_test():
 def github_webhook():
     # Validate GitHub webhook signature
     signature = request.headers.get("X-Hub-Signature-256")
+    if not signature:
+        return "Missing signature", 403
     body = request.data
-    hash = "sha256=" + hmac.new(WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, hash):
+    expected = "sha256=" + hmac.new(WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
         return "Invalid signature", 403
 
     # Only update on pushes to main branch
