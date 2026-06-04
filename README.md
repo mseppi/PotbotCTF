@@ -16,4 +16,4 @@ Push to `main` → GitHub webhook → `update_bot.sh` pulls & restarts → bot p
 
 !help for commands
 
-Credits to https://github.com/NullPxl/NullCTF please check it out
+Credits to https://github.com/NullPxl/NullCTF please check it out 
